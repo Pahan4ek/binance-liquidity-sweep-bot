@@ -1,0 +1,19 @@
+# Secrets & local configs
+config.json
+.env
+*.key
+*.token
+
+# Logs & temp outputs
+*.log
+logs/
+
+# Python cache & virtualenv
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.idea/
+.vscode/

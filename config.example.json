@@ -1,0 +1,17 @@
+{
+  "symbol": "BTCUSDT",
+  "interval": "15m",
+  "limit": 150,
+  "volume_multiplier": 1.5,
+  "swing_left": 3,
+  "swing_right": 3,
+  "oi_check_interval": 30,
+  "min_delta_ratio": 0.1,
+  "klines_refresh_interval": 120,
+  "telegram": {
+    "enabled": false,
+    "bot_token": "",
+    "chat_id": "",
+    "min_score": 4
+  }
+}
