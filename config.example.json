@@ -8,10 +8,17 @@
   "oi_check_interval": 30,
   "min_delta_ratio": 0.1,
   "klines_refresh_interval": 120,
+  "cooldown_seconds": 900,
   "telegram": {
     "enabled": false,
     "bot_token": "",
     "chat_id": "",
     "min_score": 4
+  },
+  "backtest": {
+    "taker_fee_pct": 0.05,
+    "maker_fee_pct": 0.02,
+    "slippage_pct": 0.02,
+    "target_rr": 2.0
   }
 }

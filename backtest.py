@@ -2,256 +2,258 @@ import argparse
 import sys
 import time
 from datetime import datetime
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
-import pandas as pd
 import requests
+from src.models import Candle, SwingLevel, SweepSignal
+from src.strategy import find_swings, get_active_swings_near_price, check_candle_for_sweeps
+from src.data import parse_rest_kline
 
-try:
-    if sys.platform == "win32":
-        sys.stdout.reconfigure(encoding='utf-8')
-except Exception:
-    pass
-
-def fetch_klines(symbol: str, interval: str, total_limit: int = 1000) -> pd.DataFrame:
+def fetch_historical_candles(symbol: str, interval: str, total_limit: int = 1000) -> List[Candle]:
     """
-    Fetches historical klines from Binance Futures API (chunked up to total_limit).
+    Downloads historical candles from Binance Futures REST API in batches up to 1500 per call.
     """
     symbol = symbol.upper()
-    all_rows = []
-    end_time = None
+    candles: List[Candle] = []
+    end_time: Optional[int] = None
     remaining = total_limit
 
     print(f"[*] Downloading {total_limit} candles for {symbol} ({interval})...")
 
     while remaining > 0:
-        limit = min(remaining, 500)
-        url = f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval={interval}&limit={limit}"
+        batch_limit = min(remaining, 1000)
+        url = f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval={interval}&limit={batch_limit}"
         if end_time:
             url += f"&endTime={end_time}"
 
         try:
-            r = requests.get(url, timeout=10).json()
-            if not isinstance(r, list) or len(r) == 0:
+            resp = requests.get(url, timeout=10)
+            data = resp.json()
+            if not isinstance(data, list) or len(data) == 0:
                 break
 
-            for k in r:
-                all_rows.append({
-                    'time': pd.to_datetime(k[0], unit='ms'),
-                    'open': float(k[1]),
-                    'high': float(k[2]),
-                    'low': float(k[3]),
-                    'close': float(k[4]),
-                    'volume': float(k[5]),
-                    'taker_buy_vol': float(k[9])
-                })
+            batch = [parse_rest_kline(row, is_closed=True) for row in data]
+            candles = batch + candles
+            remaining -= len(batch)
+            end_time = batch[0].open_time - 1
 
-            remaining -= len(r)
-            end_time = int(r[0][0]) - 1
-            if len(r) < limit:
+            if len(batch) < batch_limit:
                 break
-            time.sleep(0.1)
+            time.sleep(0.15)
         except Exception as e:
-            print(f"[!] Error fetching historical data: {e}")
+            print(f"[!] Network error downloading candles: {e}")
             break
 
-    if not all_rows:
-        return pd.DataFrame()
+    # Deduplicate by open_time and sort
+    seen = set()
+    unique_candles = []
+    for c in candles:
+        if c.open_time not in seen:
+            seen.add(c.open_time)
+            unique_candles.append(c)
 
-    df = pd.DataFrame(all_rows).sort_values('time').drop_duplicates('time').reset_index(drop=True)
-    return df
+    unique_candles.sort(key=lambda c: c.open_time)
+    return unique_candles
 
-def run_backtest(df: pd.DataFrame, vol_mult: float = 1.5, min_delta_ratio: float = 0.1,
-                 swing_left: int = 3, swing_right: int = 3, target_rr: float = 2.0, min_score: int = 4):
-    if len(df) < 50:
-        print("[!] Not enough data to backtest.")
+def run_simulation(
+    candles: List[Candle],
+    target_rr: float = 2.0,
+    taker_fee_pct: float = 0.05,
+    slippage_pct: float = 0.02,
+    vol_mult: float = 1.5,
+    min_delta: float = 0.1,
+    min_score: int = 4,
+    cooldown_candles: int = 1
+):
+    total_bars = len(candles)
+    if total_bars < 50:
+        print("[!] Insufficient data for simulation.")
         return
 
-    print(f"[*] Running simulation over {len(df)} candles...")
-    print(f"    Date Range: {df['time'].iloc[0]} -> {df['time'].iloc[-1]}")
-    print(f"    Parameters: Vol Spike x{vol_mult} | Min Delta: {min_delta_ratio*100:.0f}% | Target R:R: 1:{target_rr} | Min Score: {min_score}")
+    roundtrip_friction = (taker_fee_pct * 2 + slippage_pct * 2) / 100.0  # as decimal e.g. 0.0014
 
-    trades = []
-    signal_cooldown = {}
+    print(f"[*] Simulating strategy over {total_bars} bars...")
+    start_dt = datetime.fromtimestamp(candles[0].open_time / 1000).strftime('%Y-%m-%d %H:%M')
+    end_dt = datetime.fromtimestamp(candles[-1].open_time / 1000).strftime('%Y-%m-%d %H:%M')
+    print(f"    Range: {start_dt} -> {end_dt}")
+    print(f"    Settings: Target R:R 1:{target_rr} | Taker Fee: {taker_fee_pct}% | Slippage: {slippage_pct}%")
+    print(f"    Friction per roundtrip trade: {roundtrip_friction * 100:.2f}% of position notional")
 
-    for i in range(50, len(df) - 10):
-        current_candle = df.iloc[i]
-        c_time = current_candle['time']
-        c_high = current_candle['high']
-        c_low = current_candle['low']
-        c_close = current_candle['close']
-        c_vol = current_candle['volume']
-        c_buy = current_candle['taker_buy_vol']
-        c_sell = c_vol - c_buy
-        delta = c_buy - c_sell
-        delta_ratio = abs(delta) / c_vol if c_vol > 0 else 0
+    trades: List[Dict[str, Any]] = []
+    cooldown_until_bar = 0
 
-        # Historical window strictly up to current candle (no lookahead!)
-        hist = df.iloc[:i].reset_index(drop=True)
-        avg_vol = hist['volume'].iloc[-20:].mean()
-        is_high_vol = c_vol > avg_vol * vol_mult
+    for i in range(30, total_bars - 1):
+        if i < cooldown_until_bar:
+            continue
 
-        # Swing levels
-        highs, lows = [], []
-        for idx in range(swing_left, len(hist) - swing_right):
-            h = hist['high'].iloc[idx]
-            l = hist['low'].iloc[idx]
-            if all(hist['high'].iloc[idx - j] < h for j in range(1, swing_left + 1)) and \
-               all(hist['high'].iloc[idx + j] < h for j in range(1, swing_right + 1)):
-                highs.append(h)
-            if all(hist['low'].iloc[idx - j] > l for j in range(1, swing_left + 1)) and \
-               all(hist['low'].iloc[idx + j] > l for j in range(1, swing_right + 1)):
-                lows.append(l)
+        eval_candle = candles[i]
+        prior_closed = candles[:i]
 
-        recent_highs = sorted(set(highs))[-5:]
-        recent_lows = sorted(set(lows))[-5:]
+        # Calculate historical swings strictly up to current bar (no lookahead!)
+        swings = find_swings(prior_closed, left=3, right=3)
+        active_highs, active_lows = get_active_swings_near_price(swings, eval_candle.close, max_candidates=5)
 
-        # Check Bearish Sweep
-        for level in recent_highs:
-            if c_high > level and c_close < level:
-                if c_time.timestamp() - signal_cooldown.get(f"bear_{level}", 0) < 1800:
-                    continue
+        signal = check_candle_for_sweeps(
+            current_candle=eval_candle,
+            prior_closed_candles=prior_closed,
+            active_highs=active_highs,
+            active_lows=active_lows,
+            volume_multiplier=vol_mult,
+            min_delta_ratio=min_delta,
+            min_score=min_score
+        )
 
-                score = 0
-                if is_high_vol: score += 2
-                if delta < 0 and delta_ratio >= min_delta_ratio: score += 2
-                elif delta < 0: score += 1
+        if not signal:
+            continue
 
-                if score >= min_score:
-                    signal_cooldown[f"bear_{level}"] = c_time.timestamp()
-                    entry = c_close
-                    sl = c_high
-                    risk = sl - entry
-                    if risk <= 0:
-                        continue
-                    tp = entry - (risk * target_rr)
+        cooldown_until_bar = i + cooldown_candles
 
-                    # Simulate forward
-                    outcome = "OPEN"
-                    pnl_r = 0.0
-                    exit_idx = i
-                    for future_idx in range(i + 1, len(df)):
-                        f_candle = df.iloc[future_idx]
-                        if f_candle['high'] >= sl:
-                            outcome = "LOSS"
-                            pnl_r = -1.0
-                            exit_idx = future_idx
-                            break
-                        elif f_candle['low'] <= tp:
-                            outcome = "WIN"
-                            pnl_r = target_rr
-                            exit_idx = future_idx
-                            break
+        raw_entry = signal.candle_close
+        if signal.direction == "long":
+            entry = raw_entry * (1.0 + slippage_pct / 100.0)
+            sl = signal.stop_loss
+            raw_risk = entry - sl
+            if raw_risk <= 0:
+                continue
+            tp = entry + (raw_risk * target_rr)
+        else:
+            entry = raw_entry * (1.0 - slippage_pct / 100.0)
+            sl = signal.stop_loss
+            raw_risk = sl - entry
+            if raw_risk <= 0:
+                continue
+            tp = entry - (raw_risk * target_rr)
 
-                    trades.append({
-                        "type": "SHORT",
-                        "time": c_time,
-                        "entry": entry,
-                        "sl": sl,
-                        "tp": tp,
-                        "score": score,
-                        "outcome": outcome,
-                        "pnl_r": pnl_r,
-                        "duration_candles": exit_idx - i
-                    })
+        # Simulate trade execution forward
+        outcome = "OPEN"
+        exit_bar = i
+        pnl_r = 0.0
+
+        for f_idx in range(i + 1, total_bars):
+            f_candle = candles[f_idx]
+            exit_bar = f_idx
+
+            if signal.direction == "long":
+                hit_sl = f_candle.low <= sl
+                hit_tp = f_candle.high >= tp
+
+                # If both touched in the same candle, conservatively assume Stop-Loss was hit first
+                if hit_sl and hit_tp:
+                    outcome = "LOSS"
+                    exit_price = sl
+                    break
+                elif hit_sl:
+                    outcome = "LOSS"
+                    exit_price = sl
+                    break
+                elif hit_tp:
+                    outcome = "WIN"
+                    exit_price = tp
+                    break
+            else:
+                hit_sl = f_candle.high >= sl
+                hit_tp = f_candle.low <= tp
+
+                if hit_sl and hit_tp:
+                    outcome = "LOSS"
+                    exit_price = sl
+                    break
+                elif hit_sl:
+                    outcome = "LOSS"
+                    exit_price = sl
+                    break
+                elif hit_tp:
+                    outcome = "WIN"
+                    exit_price = tp
                     break
 
-        # Check Bullish Sweep
-        for level in recent_lows:
-            if c_low < level and c_close > level:
-                if c_time.timestamp() - signal_cooldown.get(f"bull_{level}", 0) < 1800:
-                    continue
+        if outcome in ("WIN", "LOSS"):
+            # Calculate net R after exchange taker fees and slippage
+            friction_cost_currency = (entry + exit_price) * (taker_fee_pct / 100.0)
+            friction_r = friction_cost_currency / raw_risk
 
-                score = 0
-                if is_high_vol: score += 2
-                if delta > 0 and delta_ratio >= min_delta_ratio: score += 2
-                elif delta > 0: score += 1
+            if outcome == "WIN":
+                pnl_r = target_rr - friction_r
+            else:
+                pnl_r = -1.0 - friction_r
 
-                if score >= min_score:
-                    signal_cooldown[f"bull_{level}"] = c_time.timestamp()
-                    entry = c_close
-                    sl = c_low
-                    risk = entry - sl
-                    if risk <= 0:
-                        continue
-                    tp = entry + (risk * target_rr)
-
-                    # Simulate forward
-                    outcome = "OPEN"
-                    pnl_r = 0.0
-                    exit_idx = i
-                    for future_idx in range(i + 1, len(df)):
-                        f_candle = df.iloc[future_idx]
-                        if f_candle['low'] <= sl:
-                            outcome = "LOSS"
-                            pnl_r = -1.0
-                            exit_idx = future_idx
-                            break
-                        elif f_candle['high'] >= tp:
-                            outcome = "WIN"
-                            pnl_r = target_rr
-                            exit_idx = future_idx
-                            break
-
-                    trades.append({
-                        "type": "LONG",
-                        "time": c_time,
-                        "entry": entry,
-                        "sl": sl,
-                        "tp": tp,
-                        "score": score,
-                        "outcome": outcome,
-                        "pnl_r": pnl_r,
-                        "duration_candles": exit_idx - i
-                    })
-                    break
+            trades.append({
+                "bar": i,
+                "time": datetime.fromtimestamp(eval_candle.open_time / 1000).strftime('%Y-%m-%d %H:%M'),
+                "direction": signal.direction.upper(),
+                "entry": entry,
+                "sl": sl,
+                "tp": tp,
+                "score": signal.score,
+                "outcome": outcome,
+                "pnl_r": pnl_r,
+                "friction_r": friction_r,
+                "duration_bars": exit_bar - i
+            })
 
     if not trades:
-        print("\n[!] No trade setups triggered with current parameters.")
+        print("[!] No trades generated with given parameters.")
         return
 
-    closed_trades = [t for t in trades if t["outcome"] in ("WIN", "LOSS")]
-    wins = [t for t in closed_trades if t["outcome"] == "WIN"]
-    losses = [t for t in closed_trades if t["outcome"] == "LOSS"]
+    wins = [t for t in trades if t["outcome"] == "WIN"]
+    losses = [t for t in trades if t["outcome"] == "LOSS"]
+    win_rate = (len(wins) / len(trades)) * 100.0
 
-    win_rate = (len(wins) / len(closed_trades) * 100) if closed_trades else 0
-    total_r = sum(t["pnl_r"] for t in closed_trades)
-    gross_profit = len(wins) * target_rr
-    gross_loss = len(losses) * 1.0
-    profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else 999.0
+    net_r_total = sum(t["pnl_r"] for t in trades)
+    expectancy_r = net_r_total / len(trades)
 
-    print("\n" + "=" * 60)
-    print("                    BACKTEST RESULTS")
-    print("=" * 60)
-    print(f"  Total Setups Triggered : {len(trades)}")
-    print(f"  Closed Trades          : {len(closed_trades)}")
-    print(f"  Wins                   : {len(wins)}")
-    print(f"  Losses                 : {len(losses)}")
-    print(f"  Win Rate               : {win_rate:.1f}%")
-    print(f"  Profit Factor          : {profit_factor:.2f}")
-    print(f"  Net Return (R-units)   : {total_r:+.1f} R")
-    print("=" * 60)
+    gross_win_r = sum(t["pnl_r"] for t in wins)
+    gross_loss_r = abs(sum(t["pnl_r"] for t in losses))
+    profit_factor = (gross_win_r / gross_loss_r) if gross_loss_r > 0 else 99.0
 
-    print("\nRecent 10 Triggered Trades:")
-    for t in trades[-10:]:
-        status = "✅ WIN " if t["outcome"] == "WIN" else ("❌ LOSS" if t["outcome"] == "LOSS" else "⏳ OPEN")
-        print(f"  {t['time']} | {t['type']:<5} | Entry: {t['entry']:.4f} | SL: {t['sl']:.4f} | TP: {t['tp']:.4f} | {status} ({t['pnl_r']:+.1f}R)")
+    # Max drawdown in R
+    cumulative_r = 0.0
+    peak_r = 0.0
+    max_dd_r = 0.0
+    for t in trades:
+        cumulative_r += t["pnl_r"]
+        if cumulative_r > peak_r:
+            peak_r = cumulative_r
+        dd = peak_r - cumulative_r
+        if dd > max_dd_r:
+            max_dd_r = dd
+
+    print("\n" + "=" * 65)
+    print("                    BACKTEST PERFORMANCE REPORT")
+    print("=" * 65)
+    print(f"  Total Trades (Closed)   : {len(trades)}")
+    print(f"  Win / Loss Count        : {len(wins)} Wins / {len(losses)} Losses")
+    print(f"  Win Rate                : {win_rate:.1f}%")
+    print(f"  Target R:R              : 1:{target_rr:.1f}")
+    print(f"  Profit Factor           : {profit_factor:.2f}")
+    print(f"  Expectancy (EV / trade) : {expectancy_r:+.2f} R")
+    print(f"  Net Total Profit        : {net_r_total:+.2f} R  (after fees & slippage)")
+    print(f"  Max Drawdown            : -{max_dd_r:.2f} R")
+    print("=" * 65)
+
+    print("\nRecent 8 Trades:")
+    for t in trades[-8:]:
+        icon = "✅ WIN " if t["outcome"] == "WIN" else "❌ LOSS"
+        print(f"  {t['time']} | {t['direction']:<5} | Entry: {t['entry']:.2f} | SL: {t['sl']:.2f} | {icon} ({t['pnl_r']:+.2f}R, fee: -{t['friction_r']:.2f}R)")
 
 def main():
-    parser = argparse.ArgumentParser(description="Backtester for Liquidity Sweep Strategy")
+    parser = argparse.ArgumentParser(description="Realistic Backtest for Liquidity Sweep Strategy")
     parser.add_argument("--symbol", "-s", default="BTCUSDT", help="Trading pair (default: BTCUSDT)")
     parser.add_argument("--interval", "-i", default="15m", help="Candle timeframe (default: 15m)")
-    parser.add_argument("--limit", "-l", type=int, default=1000, help="Total historical candles (default: 1000)")
-    parser.add_argument("--vol-mult", type=float, default=1.5, help="Volume spike threshold")
-    parser.add_argument("--rr", type=float, default=2.0, help="Target Risk:Reward ratio (default: 2.0)")
-    parser.add_argument("--min-score", type=int, default=4, help="Minimum confluence score to trigger trade")
+    parser.add_argument("--limit", "-l", type=int, default=1000, help="Number of candles (default: 1000)")
+    parser.add_argument("--rr", type=float, default=2.0, help="Risk:Reward ratio (default: 2.0)")
+    parser.add_argument("--taker-fee", type=float, default=0.05, help="Taker fee %% per side (default: 0.05)")
+    parser.add_argument("--slippage", type=float, default=0.02, help="Slippage %% per side (default: 0.02)")
     args = parser.parse_args()
 
-    df = fetch_klines(args.symbol, args.interval, total_limit=args.limit)
-    if not df.empty:
-        run_backtest(df, vol_mult=args.vol_mult, target_rr=args.rr, min_score=args.min_score)
-    else:
-        print("[!] No klines received.")
+    candles = fetch_historical_candles(args.symbol, args.interval, total_limit=args.limit)
+    if candles:
+        run_simulation(
+            candles,
+            target_rr=args.rr,
+            taker_fee_pct=args.taker_fee,
+            slippage_pct=args.slippage
+        )
 
 if __name__ == "__main__":
     main()
