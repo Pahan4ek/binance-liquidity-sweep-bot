@@ -34,7 +34,8 @@ def check_git_updates() -> bool:
         if res.returncode == 0:
             count = int(res.stdout.strip() or 0)
             if count > 0:
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] [Watchdog] Detected {count} incoming commit(s). Pulling...")
+                now = datetime.now().strftime('%H:%M:%S')
+                print(f"[{now}] [Watchdog] Detected {count} incoming commit(s). Pulling...")
                 pull_res = subprocess.run(["git", "pull"], cwd=BASE_DIR, capture_output=True, text=True, timeout=20)
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] [Watchdog] {pull_res.stdout.strip()}")
                 return True
@@ -44,11 +45,14 @@ def check_git_updates() -> bool:
 
 def main():
     parser = argparse.ArgumentParser(description="24/7 Watchdog Supervisor for Sweep Bot")
-    parser.add_argument("--auto-update", action="store_true", help="Enable automatic git pull on changes")
-    parser.add_argument("--update-interval", type=int, default=1800, help="Git update check interval in seconds (default: 1800)")
+    parser.add_argument("--auto-update", action="store_true",
+                        help="git pull on a timer and restart on new commits. Runs whatever lands on the "
+                             "tracked branch, so only use it on a branch you control")
+    parser.add_argument("--update-interval", type=int, default=1800,
+                        help="Git update check interval in seconds (default: 1800)")
     parser.add_argument("--max-retries", type=int, default=50, help="Maximum consecutive restarts on failure")
-    parser.add_argument("bot_args", nargs=argparse.REMAINDER, help="Arguments passed through to sweep_bot.py")
-    args = parser.parse_args()
+    # Anything the watchdog doesn't know (--symbol, --interval, ...) is passed through to sweep_bot.py
+    args, bot_args = parser.parse_known_args()
 
     print("=" * 65)
     print("  Sweep Bot 24/7 Watchdog Supervisor")
@@ -60,9 +64,7 @@ def main():
     last_update_check = time.time()
 
     cmd = [sys.executable, BOT_SCRIPT]
-    if args.bot_args:
-        extra = args.bot_args[1:] if args.bot_args and args.bot_args[0] == "--" else args.bot_args
-        cmd.extend(extra)
+    cmd.extend(a for a in bot_args if a != "--")
 
     while True:
         try:
@@ -98,7 +100,8 @@ def main():
                         sys.exit(1)
 
                     backoff = min(5 * consecutive_crashes, 30)
-                    print(f"[{ts_exit}] [Watchdog] Restarting bot in {backoff}s (consecutive crash #{consecutive_crashes})...")
+                    print(f"[{ts_exit}] [Watchdog] Restarting bot in {backoff}s "
+                          f"(consecutive crash #{consecutive_crashes})...")
                     time.sleep(backoff)
                     break
 
