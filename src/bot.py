@@ -5,14 +5,14 @@ import sys
 import threading
 import time
 from datetime import datetime
-from typing import Optional, List, Dict
+
 import websocket
 
 from src.config import BotConfig, load_config
-from src.data import CandleBuffer, fetch_rest_klines, parse_ws_kline, fetch_current_open_interest
-from src.models import Candle, SwingLevel, SweepSignal
-from src.strategy import find_swings, get_active_swings_near_price, check_candle_for_sweeps
+from src.data import CandleBuffer, fetch_current_open_interest, fetch_rest_klines, parse_ws_kline
+from src.models import Candle, SweepSignal, SwingLevel
 from src.notify import send_telegram_alert
+from src.strategy import check_candle_for_sweeps, find_swings, get_active_swings_near_price
 
 logging.basicConfig(
     level=logging.INFO,
@@ -25,11 +25,11 @@ class SweepBot:
     def __init__(self, cfg: BotConfig):
         self.cfg = cfg
         self.buffer = CandleBuffer(max_size=cfg.limit + 50)
-        self.swings: List[SwingLevel] = []
-        self.signal_cooldown: Dict[str, float] = {}
-        self.live_candle: Optional[Candle] = None
-        self.last_oi: Optional[float] = None
-        self.ws: Optional[websocket.WebSocketApp] = None
+        self.swings: list[SwingLevel] = []
+        self.signal_cooldown: dict[str, float] = {}
+        self.live_candle: Candle | None = None
+        self.last_oi: float | None = None
+        self.ws: websocket.WebSocketApp | None = None
         self.running = False
         self._user_stopped = False
 
@@ -150,7 +150,7 @@ class SweepBot:
         print(f"  Entry Price : {sig.candle_close:.4f}")
         print(f"  Stop-Loss   : {sig.stop_loss:.4f}")
         print(f"  Score       : {sig.score}/6")
-        print(f"  Confirmations:")
+        print("  Confirmations:")
         for r in sig.reasons:
             print(f"    • {r}")
         print(f"{border}\n")

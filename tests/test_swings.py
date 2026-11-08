@@ -1,6 +1,8 @@
 import unittest
+
 from src.models import Candle, SwingLevel
 from src.strategy import find_swings, get_active_swings_near_price
+
 
 def make_candle(open_time: int, high: float, low: float, close: float, volume: float = 100.0) -> Candle:
     return Candle(
@@ -26,7 +28,7 @@ class TestSwings(unittest.TestCase):
             (13, 8, 10),
             (11, 7, 8),
         ]
-        candles = [make_candle(i * 60000, h, l, c) for i, (h, l, c) in enumerate(prices)]
+        candles = [make_candle(i * 60000, h, lo, c) for i, (h, lo, c) in enumerate(prices)]
 
         swings = find_swings(candles, left=2, right=2)
         highs = [s for s in swings if s.level_type == "high"]
@@ -45,7 +47,7 @@ class TestSwings(unittest.TestCase):
             (13, 8, 10),
             (23, 15, 22),  # Closes at 22 > 20 -> mitigates swing high
         ]
-        candles = [make_candle(i * 60000, h, l, c) for i, (h, l, c) in enumerate(prices)]
+        candles = [make_candle(i * 60000, h, lo, c) for i, (h, lo, c) in enumerate(prices)]
 
         swings = find_swings(candles, left=2, right=2)
         highs = [s for s in swings if s.level_type == "high"]

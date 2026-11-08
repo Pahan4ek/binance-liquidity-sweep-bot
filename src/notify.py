@@ -1,6 +1,7 @@
 import logging
-from typing import Optional
+
 import requests
+
 from src.models import SweepSignal
 
 logger = logging.getLogger("telegram_notifier")
@@ -46,7 +47,8 @@ def send_telegram_alert(
         resp = requests.post(url, json=payload, timeout=8)
         data = resp.json()
         if not resp.ok or not data.get("ok"):
-            logger.warning("Telegram alert failed. HTTP %s: %s", resp.status_code, data.get("description", "Unknown error"))
+            logger.warning("Telegram alert failed. HTTP %s: %s", resp.status_code,
+                           data.get("description", "Unknown error"))
             return False
         return True
     except Exception as e:
