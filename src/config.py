@@ -1,10 +1,10 @@
 import copy
 import json
 import os
-from dataclasses import dataclass, field
-from typing import Optional, Dict, Any
+from dataclasses import dataclass
+from typing import Any
 
-DEFAULT_CONFIG_DICT: Dict[str, Any] = {
+DEFAULT_CONFIG_DICT: dict[str, Any] = {
     "symbol": "BTCUSDT",
     "interval": "15m",
     "limit": 150,
@@ -50,7 +50,7 @@ class BotConfig:
     slippage_pct: float = 0.02
     target_rr: float = 2.0
 
-def load_config(config_path: Optional[str] = None) -> BotConfig:
+def load_config(config_path: str | None = None) -> BotConfig:
     """
     Loads config safely using deepcopy and merges with optional json file and env vars.
     """
@@ -62,7 +62,7 @@ def load_config(config_path: Optional[str] = None) -> BotConfig:
 
     if os.path.exists(config_path):
         try:
-            with open(config_path, "r", encoding="utf-8") as f:
+            with open(config_path, encoding="utf-8") as f:
                 user_dict = json.load(f)
                 for k, v in user_dict.items():
                     if isinstance(v, dict) and k in raw and isinstance(raw[k], dict):

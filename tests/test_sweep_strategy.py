@@ -1,8 +1,11 @@
 import unittest
+
 from src.models import Candle, SwingLevel
 from src.strategy import check_candle_for_sweeps
 
-def make_candle(open_time: int, high: float, low: float, close: float, volume: float = 100.0, taker_buy: float = 50.0) -> Candle:
+
+def make_candle(open_time: int, high: float, low: float, close: float,
+                volume: float = 100.0, taker_buy: float = 50.0) -> Candle:
     return Candle(
         open_time=open_time,
         close_time=open_time + 60000,

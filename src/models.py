@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Optional, List
+
 
 @dataclass
 class Candle:
@@ -12,8 +12,8 @@ class Candle:
     volume: float          # Base asset volume
     taker_buy_vol: float   # Base asset taker buy volume
     is_closed: bool = True
-    oi_open: Optional[float] = None
-    oi_close: Optional[float] = None
+    oi_open: float | None = None
+    oi_close: float | None = None
 
     @property
     def taker_sell_vol(self) -> float:
@@ -28,7 +28,7 @@ class Candle:
         return (abs(self.delta) / self.volume) if self.volume > 0 else 0.0
 
     @property
-    def oi_delta(self) -> Optional[float]:
+    def oi_delta(self) -> float | None:
         if self.oi_open is not None and self.oi_close is not None:
             return self.oi_close - self.oi_open
         return None
@@ -40,7 +40,7 @@ class SwingLevel:
     level_type: str  # "high" or "low"
     bar_index: int = 0
     active: bool = True
-    mitigated_at: Optional[int] = None
+    mitigated_at: int | None = None
 
 @dataclass
 class SweepSignal:
@@ -51,8 +51,8 @@ class SweepSignal:
     extreme_price: float    # Candle high for short, low for long
     stop_loss: float
     score: int              # Out of 6
-    reasons: List[str] = field(default_factory=list)
+    reasons: list[str] = field(default_factory=list)
     delta: float = 0.0
     delta_ratio: float = 0.0
     volume_ratio: float = 0.0
-    oi_delta: Optional[float] = None
+    oi_delta: float | None = None

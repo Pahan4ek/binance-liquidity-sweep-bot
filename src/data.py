@@ -1,8 +1,9 @@
 import threading
-import time
-from typing import List, Dict, Optional, Any
+
 import requests
+
 from src.models import Candle
+
 
 def parse_rest_kline(k: list, is_closed: bool = True) -> Candle:
     """
@@ -60,7 +61,7 @@ class CandleBuffer:
     """
     def __init__(self, max_size: int = 500):
         self.max_size = max_size
-        self._candles: List[Candle] = []
+        self._candles: list[Candle] = []
         self._lock = threading.Lock()
 
     def upsert(self, candle: Candle):
@@ -83,23 +84,23 @@ class CandleBuffer:
             if len(self._candles) > self.max_size:
                 self._candles = self._candles[-self.max_size:]
 
-    def get_all(self) -> List[Candle]:
+    def get_all(self) -> list[Candle]:
         with self._lock:
             return list(self._candles)
 
-    def get_closed(self) -> List[Candle]:
+    def get_closed(self) -> list[Candle]:
         with self._lock:
             return [c for c in self._candles if c.is_closed]
 
-    def set_batch(self, candles: List[Candle]):
+    def set_batch(self, candles: list[Candle]):
         with self._lock:
-            unique_map: Dict[int, Candle] = {}
+            unique_map: dict[int, Candle] = {}
             for c in candles:
                 unique_map[c.open_time] = c
             sorted_list = sorted(unique_map.values(), key=lambda c: c.open_time)
             self._candles = sorted_list[-self.max_size:]
 
-def fetch_rest_klines(symbol: str, interval: str, limit: int = 150) -> List[Candle]:
+def fetch_rest_klines(symbol: str, interval: str, limit: int = 150) -> list[Candle]:
     """
     Fetches latest klines from Binance Futures REST API.
     Marks all except the last item as is_closed=True.
@@ -121,7 +122,7 @@ def fetch_rest_klines(symbol: str, interval: str, limit: int = 150) -> List[Cand
         print(f"[!] Error loading REST klines: {e}")
         return []
 
-def fetch_current_open_interest(symbol: str) -> Optional[float]:
+def fetch_current_open_interest(symbol: str) -> float | None:
     url = f"https://fapi.binance.com/fapi/v1/openInterest?symbol={symbol.upper()}"
     try:
         r = requests.get(url, timeout=5).json()

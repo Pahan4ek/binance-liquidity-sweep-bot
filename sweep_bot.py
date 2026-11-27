@@ -1,7 +1,8 @@
 import argparse
-import sys
-from src.config import load_config
+
 from src.bot import SweepBot
+from src.config import load_config
+
 
 def main():
     parser = argparse.ArgumentParser(description="Binance Futures Liquidity Sweep & Order Flow Bot")
